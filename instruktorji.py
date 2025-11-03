@@ -48,8 +48,10 @@ _ws = ensure_ws(WS_TITLE, HEADERS)
 # --- Flask / baza ---
 app = Flask(__name__)
 app.secret_key = "instruktorji_secret"
-DB_PATH = "instruktorji.db"
+DB_PATH = os.getenv("DB_PATH", "instruktorji.db")
 ADMIN_PASS = "instruktorji2025"
+
+init_db()
 
 PREDMETI = [
     ("mat","Matematika"), ("fiz","Fizika"), ("ang","Angleščina"),
