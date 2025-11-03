@@ -17,15 +17,14 @@ if not os.path.isfile(SERVICE_JSON_PATH):
 import json
 
 if os.getenv("SERVICE_ACCOUNT_JSON"):
-    CREDS = Credentials.from_service_account_info(
-        json.loads(os.environ["SERVICE_ACCOUNT_JSON"]),
-        scopes=SCOPES,
-    )
+    info = json.loads(os.getenv("SERVICE_ACCOUNT_JSON"))
+    CREDS = Credentials.from_service_account_info(info, scopes=SCOPES)
 else:
     CREDS = Credentials.from_service_account_file(SERVICE_JSON_PATH, scopes=SCOPES)
 
 _gc = gspread.authorize(CREDS)
 _ss = _gc.open_by_key(SHEET_ID)
+
 
 
 def ensure_ws(title, headers):
