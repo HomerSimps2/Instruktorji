@@ -163,7 +163,7 @@ FORM_HTML = f"""
           <label for="chk_{{{{code}}}}">{{{{label}}}}</label>
         </div>
         <div class="teacher-tab" id="tab_{{{{code}}}}">
-          <label>Učitelj {{'{{label}}'}} <input name="teacher_{{{{code}}}}"></label>
+          <label>Učeči profesor {{{{label}}}} <input name="teacher_{{{{code}}}}"></label>
         </div>
       {{% endfor %}}
     </fieldset>
