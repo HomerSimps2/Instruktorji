@@ -13,9 +13,20 @@ SERVICE_JSON_PATH = "/etc/secrets/service_account.json"
 if not os.path.isfile(SERVICE_JSON_PATH):
     SERVICE_JSON_PATH = "service_account.json"
 
-CREDS = Credentials.from_service_account_file(SERVICE_JSON_PATH, scopes=SCOPES)
+# Poverilnice za Google – v Renderju iz ENV, lokalno iz datoteke
+import json
+
+if os.getenv("SERVICE_ACCOUNT_JSON"):
+    CREDS = Credentials.from_service_account_info(
+        json.loads(os.environ["SERVICE_ACCOUNT_JSON"]),
+        scopes=SCOPES,
+    )
+else:
+    CREDS = Credentials.from_service_account_file(SERVICE_JSON_PATH, scopes=SCOPES)
+
 _gc = gspread.authorize(CREDS)
 _ss = _gc.open_by_key(SHEET_ID)
+
 
 def ensure_ws(title, headers):
     try:
