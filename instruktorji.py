@@ -119,9 +119,12 @@ def init_db():
     log.info("DB ready at %s", DB_PATH)
 
 # na Renderju gunicorn ne zažene __main__, zato zagotovimo tabelo ob prvem requestu
-@app.before_first_request
+@app.before_request
 def _ensure_db():
-    init_db()
+    if not hasattr(app, "_db_ready"):
+        init_db()
+        app._db_ready = True
+
 
 def add_vnos(ime, priimek, email, razred, oddelek, predmeti_str):
     con = sqlite3.connect(DB_PATH)
