@@ -1,39 +1,41 @@
 # instruktorji.py — prijava dijakov, ki lahko poučujejo (instruktorji)
 from flask import Flask, request, redirect, url_for, render_template_string, flash, session, send_file
-import sqlite3, io, csv, os
+import sqlite3, io, csv, os, json
 from datetime import datetime
 
 # --- Google Sheets ---
 import gspread
+from gspread.exceptions import WorksheetNotFound
 from google.oauth2.service_account import Credentials
 
-SHEET_ID = "1pRGqMwog7XULSUzz-P7nEBKptHxZ9yZ6DcVDyyzz-GA"  # <— zamenjaj s svojim ID
+SHEET_ID = "1pRGqMwog7XULSUzz-P7nEBKptHxZ9yZ6DcVDyyzz-GA"  # <-- zamenjaj s svojim ID
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+
+# Privzeta pot do Secret File (Render) ali lokalna datoteka
 SERVICE_JSON_PATH = "/etc/secrets/service_account.json"
 if not os.path.isfile(SERVICE_JSON_PATH):
     SERVICE_JSON_PATH = "service_account.json"
 
-# Poverilnice za Google – v Renderju iz ENV, lokalno iz datoteke
-import json
-
-if os.getenv("SERVICE_ACCOUNT_JSON"):
+# Poverilnice: najprej datoteka (Secret File), nato ENV fallback
+if os.path.isfile(SERVICE_JSON_PATH):
+    CREDS = Credentials.from_service_account_file(SERVICE_JSON_PATH, scopes=SCOPES)
+elif os.getenv("SERVICE_ACCOUNT_JSON"):
     info = json.loads(os.getenv("SERVICE_ACCOUNT_JSON"))
     CREDS = Credentials.from_service_account_info(info, scopes=SCOPES)
 else:
-    CREDS = Credentials.from_service_account_file(SERVICE_JSON_PATH, scopes=SCOPES)
+    raise RuntimeError("Manjka service account JSON (ne najdem datoteke in ni SERVICE_ACCOUNT_JSON).")
 
 _gc = gspread.authorize(CREDS)
 _ss = _gc.open_by_key(SHEET_ID)
 
-
-
 def ensure_ws(title, headers):
+    """Ustvari delovni list, če ne obstaja; doda glavo, če je prazen."""
     try:
         ws = _ss.worksheet(title)
-    except gspread.WorksheetNotFound:
+    except WorksheetNotFound:
         ws = _ss.add_worksheet(title=title, rows=1000, cols=max(10, len(headers)))
         ws.append_row(headers)
-    # če je prazen, dodaj glavo
+        return ws
     try:
         if not ws.get_all_values():
             ws.append_row(headers)
@@ -48,10 +50,10 @@ _ws = ensure_ws(WS_TITLE, HEADERS)
 # --- Flask / baza ---
 app = Flask(__name__)
 app.secret_key = "instruktorji_secret"
-DB_PATH = os.getenv("DB_PATH", "instruktorji.db")
-ADMIN_PASS = "instruktorji2025"
 
-init_db()
+# /tmp je na Renderju vedno zapisljiv
+DB_PATH = os.getenv("DB_PATH", "/tmp/instruktorji.db")
+ADMIN_PASS = "instruktorji2025"
 
 PREDMETI = [
     ("mat","Matematika"), ("fiz","Fizika"), ("ang","Angleščina"),
@@ -67,17 +69,22 @@ def init_db():
     cur.execute("""
         CREATE TABLE IF NOT EXISTS instruktors (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            datum TEXT NOT NULL,
-            ime TEXT NOT NULL,
+            datum   TEXT NOT NULL,
+            ime     TEXT NOT NULL,
             priimek TEXT NOT NULL,
-            email TEXT NOT NULL,
-            razred TEXT NOT NULL,
+            email   TEXT NOT NULL,
+            razred  TEXT NOT NULL,
             oddelek TEXT NOT NULL,
             predmeti TEXT NOT NULL
         )
     """)
     con.commit()
     con.close()
+
+# na Renderju gunicorn ne zažene __main__, zato zagotovimo tabelo ob prvem requestu
+@app.before_first_request
+def _ensure_db():
+    init_db()
 
 def add_vnos(ime, priimek, email, razred, oddelek, predmeti_str):
     con = sqlite3.connect(DB_PATH)
@@ -286,12 +293,17 @@ def oddaj():
                 return redirect(url_for("index"))
             pari.append(f"{label} ({teacher})")
 
-    predmeti_str = "; ".join(pari)
+    predmeti_str = "; ".join(pari) if pari else "—"
+
     # SQLite
     add_vnos(ime, priimek, email, razred, oddelek, predmeti_str)
-    # Google Sheets
+
+    # Google Sheets (best-effort)
     try:
-        _ws.append_row([datetime.now().strftime("%Y-%m-%d %H:%M"), ime, priimek, email, razred, oddelek, predmeti_str])
+        _ws.append_row([
+            datetime.now().strftime("%Y-%m-%d %H:%M"),
+            ime, priimek, email, razred, oddelek, predmeti_str
+        ])
     except Exception as e:
         print("Sheets zapis ni uspel:", e)
 
@@ -347,8 +359,12 @@ def export_csv():
     for r in rows:
         w.writerow(list(r))
     data = buf.getvalue().encode("utf-8-sig")
-    return send_file(io.BytesIO(data), mimetype="text/csv",
-                     as_attachment=True, download_name="instruktorji.csv")
+    return send_file(
+        io.BytesIO(data),
+        mimetype="text/csv",
+        as_attachment=True,
+        download_name="instruktorji.csv"
+    )
 
 if __name__ == "__main__":
     init_db()
