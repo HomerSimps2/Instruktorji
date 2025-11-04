@@ -1,39 +1,76 @@
 # instruktorji.py — prijava dijakov, ki lahko poučujejo (instruktorji)
+
 from flask import Flask, request, redirect, url_for, render_template_string, flash, session, send_file
-import sqlite3, io, csv, os, json
+import sqlite3, io, csv, os, json, logging
 from datetime import datetime
 
-# --- Google Sheets ---
+# --- Logging (koristno na Render Logs) ---
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("instruktorji")
+
+# --- Google Sheets / gspread ---
 import gspread
 from gspread.exceptions import WorksheetNotFound
 from google.oauth2.service_account import Credentials
 
-SHEET_ID = "1pRGqMwog7XULSUzz-P7nEBKptHxZ9yZ6DcVDyyzz-GA"  # <-- zamenjaj s svojim ID
+SHEET_ID = "1pRGqMwog7XULSUzz-P7nEBKptHxZ9yZ6DcVDyyzz-GA"  # <-- nujno: pravi ID med /d/ in /edit
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
-# Privzeta pot do Secret File (Render) ali lokalna datoteka
-SERVICE_JSON_PATH = "/etc/secrets/service_account.json"
-if not os.path.isfile(SERVICE_JSON_PATH):
-    SERVICE_JSON_PATH = "service_account.json"
+# Pot do Secret File (Render) ali fallback na lokalno datoteko
+SECRET_PATH = "/etc/secrets/service_account.json"
+LOCAL_PATH  = "service_account.json"
 
-# Poverilnice: najprej datoteka (Secret File), nato ENV fallback
-if os.path.isfile(SERVICE_JSON_PATH):
-    CREDS = Credentials.from_service_account_file(SERVICE_JSON_PATH, scopes=SCOPES)
-elif os.getenv("SERVICE_ACCOUNT_JSON"):
-    info = json.loads(os.getenv("SERVICE_ACCOUNT_JSON"))
-    CREDS = Credentials.from_service_account_info(info, scopes=SCOPES)
-else:
-    raise RuntimeError("Manjka service account JSON (ne najdem datoteke in ni SERVICE_ACCOUNT_JSON).")
+def _build_creds():
+    """
+    Vrne google Credentials s prednostnim redom:
+    1) /etc/secrets/service_account.json (Render Secret File)
+    2) lokalna 'service_account.json' (lokalni razvoj)
+    3) ENV SERVICE_ACCOUNT_JSON (če res želiš ENV)
+    """
+    if os.path.isfile(SECRET_PATH):
+        log.info("Using service account from Secret File: %s", SECRET_PATH)
+        return Credentials.from_service_account_file(SECRET_PATH, scopes=SCOPES)
+    if os.path.isfile(LOCAL_PATH):
+        log.info("Using service account from local file: %s", LOCAL_PATH)
+        return Credentials.from_service_account_file(LOCAL_PATH, scopes=SCOPES)
 
-_gc = gspread.authorize(CREDS)
-_ss = _gc.open_by_key(SHEET_ID)
+    env_json = os.getenv("SERVICE_ACCOUNT_JSON")
+    if env_json:
+        log.info("Using service account from ENV SERVICE_ACCOUNT_JSON")
+        info = json.loads(env_json)
+        return Credentials.from_service_account_info(info, scopes=SCOPES)
 
-def ensure_ws(title, headers):
-    """Ustvari delovni list, če ne obstaja; doda glavo, če je prazen."""
+    raise RuntimeError(
+        "Manjka service account (ne najdem /etc/secrets/service_account.json, ne lokalne datoteke, ne ENV)."
+    )
+
+# Lazy inicializacija Google Sheeta (da app preživi tudi, če Sheet trenutno ni dostopen)
+_gs_client = None
+_gs_spread = None
+
+def _get_spreadsheet():
+    global _gs_client, _gs_spread
+    if _gs_spread is not None:
+        return _gs_spread
     try:
-        ws = _ss.worksheet(title)
+        creds = _build_creds()
+        _gs_client = gspread.authorize(creds)
+        _gs_spread = _gs_client.open_by_key(SHEET_ID)
+        log.info("Connected to Google Sheet %s", SHEET_ID)
+        return _gs_spread
+    except Exception as e:
+        log.exception("Ne morem se povezati na Google Sheet: %s", e)
+        return None
+
+def _ensure_ws(title, headers):
+    """Ustvari delovni list, če ne obstaja; doda glavo, če je prazen."""
+    ss = _get_spreadsheet()
+    if ss is None:
+        return None
+    try:
+        ws = ss.worksheet(title)
     except WorksheetNotFound:
-        ws = _ss.add_worksheet(title=title, rows=1000, cols=max(10, len(headers)))
+        ws = ss.add_worksheet(title=title, rows=1000, cols=max(10, len(headers)))
         ws.append_row(headers)
         return ws
     try:
@@ -44,15 +81,14 @@ def ensure_ws(title, headers):
     return ws
 
 WS_TITLE = "Instruktorji"
-HEADERS = ["Datum","Ime","Priimek","E-pošta","Razred","Oddelek","Predmeti (učitelj)"]
-_ws = ensure_ws(WS_TITLE, HEADERS)
+HEADERS  = ["Datum","Ime","Priimek","E-pošta","Razred","Oddelek","Predmeti (učitelj)"]
 
 # --- Flask / baza ---
 app = Flask(__name__)
 app.secret_key = "instruktorji_secret"
 
-# /tmp je na Renderju vedno zapisljiv
-DB_PATH = os.getenv("DB_PATH", "/tmp/instruktorji.db")
+# /tmp je zapisljiv na Renderju
+DB_PATH   = os.getenv("DB_PATH", "/tmp/instruktorji.db")
 ADMIN_PASS = "instruktorji2025"
 
 PREDMETI = [
@@ -68,18 +104,19 @@ def init_db():
     cur = con.cursor()
     cur.execute("""
         CREATE TABLE IF NOT EXISTS instruktors (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            datum   TEXT NOT NULL,
-            ime     TEXT NOT NULL,
-            priimek TEXT NOT NULL,
-            email   TEXT NOT NULL,
-            razred  TEXT NOT NULL,
-            oddelek TEXT NOT NULL,
+            id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            datum    TEXT NOT NULL,
+            ime      TEXT NOT NULL,
+            priimek  TEXT NOT NULL,
+            email    TEXT NOT NULL,
+            razred   TEXT NOT NULL,
+            oddelek  TEXT NOT NULL,
             predmeti TEXT NOT NULL
         )
     """)
     con.commit()
     con.close()
+    log.info("DB ready at %s", DB_PATH)
 
 # na Renderju gunicorn ne zažene __main__, zato zagotovimo tabelo ob prvem requestu
 @app.before_first_request
@@ -300,12 +337,16 @@ def oddaj():
 
     # Google Sheets (best-effort)
     try:
-        _ws.append_row([
-            datetime.now().strftime("%Y-%m-%d %H:%M"),
-            ime, priimek, email, razred, oddelek, predmeti_str
-        ])
+        ws = _ensure_ws(WS_TITLE, HEADERS)
+        if ws is not None:
+            ws.append_row([
+                datetime.now().strftime("%Y-%m-%d %H:%M"),
+                ime, priimek, email, razred, oddelek, predmeti_str
+            ])
+        else:
+            log.warning("Sheets zapis preskočen (ni povezave).")
     except Exception as e:
-        print("Sheets zapis ni uspel:", e)
+        log.exception("Sheets zapis ni uspel: %s", e)
 
     flash("Hvala! Prijava je shranjena.", "ok")
     return redirect(url_for("index"))
